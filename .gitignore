@@ -1,0 +1,35 @@
+# Secrets
+.env
+.env.local
+*.secret
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Airflow runtime
+logs/
+config/
+plugins/__pycache__/
+
+# Local databases and storage
+postgres_data/
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated data
+data/output/

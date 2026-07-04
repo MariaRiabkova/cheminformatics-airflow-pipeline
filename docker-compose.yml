@@ -130,15 +130,16 @@ services:
 
   storage-init:
     build:
+      context: .
       dockerfile: local-storage-init.Dockerfile
     depends_on:
       storage:
         condition: service_started
-    command:
-      - -c
-      - |
-        /usr/bin/mc config host add storage http://storage:9000 minio_access_key minio_secret_key
-        /usr/bin/mc mb storage/bronze
+    command: >
+      -c '
+      /usr/bin/mc alias set storage http://storage:9000 minio_access_key minio_secret_key &&
+      /usr/bin/mc mb --ignore-existing storage/bronze
+      '
 
   local-db:
     container_name: "local-db"
@@ -157,13 +158,13 @@ services:
       retries: 5
       start_period: 5s
 
-  local-db-migrations:
-    build:
-      dockerfile: local-migrations.Dockerfile
-    depends_on:
-      local-db:
-        condition: service_healthy
-    restart: on-failure
+  #  local-db-migrations:
+#    build:
+#      dockerfile: local-migrations.Dockerfile
+#    depends_on:
+#      local-db:
+#        condition: service_healthy
+#    restart: on-failure
 
 volumes:
   postgres-db-volume:
