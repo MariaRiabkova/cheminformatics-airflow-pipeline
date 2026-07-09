@@ -11,6 +11,7 @@ from lib.molecules.fingerprints import calculate_fingerprints_dataframe
 from lib.molecules.pipeline import generate_molecules_from_csv_bytes
 from lib.molecules.properties import calculate_properties_dataframe
 from lib.molecules.smiles_parser import dataframe_to_csv_bytes, read_csv_bytes
+from lib.molecules.dataset_discovery import discover_datasets_to_process
 
 
 BUCKET_NAME = os.getenv(
@@ -44,6 +45,7 @@ DEFAULT_N_CLUSTERS = int(
 ObjectExists = Callable[[str, str, str], bool]
 DownloadObject = Callable[[str, str, str], bytes]
 UploadBytes = Callable[[bytes, str, str, str, bool], None]
+ListObjectKeys = Callable[[str, str, str], list[str]]
 
 
 def normalize_dataset_id(
@@ -580,3 +582,100 @@ def process_clustering_s3_dataset(
     )
 
     return output_key
+
+def discover_s3_datasets_to_process(
+    list_object_keys: ListObjectKeys,
+    overwrite: bool = False,
+    bucket_name: str = BUCKET_NAME,
+    aws_conn_id: str = AWS_CONN_ID,
+    input_prefix: str = INPUT_PREFIX,
+    output_prefix: str = OUTPUT_PREFIX,
+) -> list[str]:
+    """Discover complete S3 datasets that require processing."""
+    input_keys = list_object_keys(
+        input_prefix,
+        bucket_name,
+        aws_conn_id,
+    )
+
+    output_keys = list_object_keys(
+        output_prefix,
+        bucket_name,
+        aws_conn_id,
+    )
+
+    return discover_datasets_to_process(
+        input_keys=input_keys,
+        output_keys=output_keys,
+        overwrite=overwrite,
+        input_prefix=input_prefix,
+        output_prefix=output_prefix,
+    )
+
+
+def process_complete_s3_dataset(
+    dataset_id: str,
+    object_exists: ObjectExists,
+    download_object: DownloadObject,
+    upload_bytes: UploadBytes,
+    overwrite: bool = False,
+    n_clusters: int | str = DEFAULT_N_CLUSTERS,
+    bucket_name: str = BUCKET_NAME,
+    aws_conn_id: str = AWS_CONN_ID,
+    input_prefix: str = INPUT_PREFIX,
+    output_prefix: str = OUTPUT_PREFIX,
+) -> dict[str, str]:
+    """Run the complete molecular pipeline for one S3 dataset."""
+    generated_key = process_s3_dataset(
+        dataset_id=dataset_id,
+        object_exists=object_exists,
+        download_object=download_object,
+        upload_bytes=upload_bytes,
+        bucket_name=bucket_name,
+        aws_conn_id=aws_conn_id,
+        input_prefix=input_prefix,
+        output_prefix=output_prefix,
+        replace=overwrite,
+    )
+
+    properties_key = process_properties_s3_dataset(
+        dataset_id=dataset_id,
+        object_exists=object_exists,
+        download_object=download_object,
+        upload_bytes=upload_bytes,
+        bucket_name=bucket_name,
+        aws_conn_id=aws_conn_id,
+        output_prefix=output_prefix,
+        replace=overwrite,
+    )
+
+    fingerprints_key = process_fingerprints_s3_dataset(
+        dataset_id=dataset_id,
+        object_exists=object_exists,
+        download_object=download_object,
+        upload_bytes=upload_bytes,
+        bucket_name=bucket_name,
+        aws_conn_id=aws_conn_id,
+        output_prefix=output_prefix,
+        replace=overwrite,
+    )
+
+    clustered_key = process_clustering_s3_dataset(
+        dataset_id=dataset_id,
+        object_exists=object_exists,
+        download_object=download_object,
+        upload_bytes=upload_bytes,
+        n_clusters=n_clusters,
+        bucket_name=bucket_name,
+        aws_conn_id=aws_conn_id,
+        output_prefix=output_prefix,
+        replace=overwrite,
+    )
+
+    return {
+        "generated_molecules": generated_key,
+        "molecular_properties": properties_key,
+        "fingerprints": fingerprints_key,
+        "clustered_molecules": clustered_key,
+    }
+
