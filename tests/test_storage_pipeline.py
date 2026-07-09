@@ -3,6 +3,7 @@ from __future__ import annotations
 from io import BytesIO
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -75,6 +76,61 @@ def test_normalize_dataset_id_rejects_backslash():
         )
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (5, 5),
+        ("5", 5),
+        (" 5 ", 5),
+    ],
+)
+def test_normalize_n_clusters(
+    value: int | str,
+    expected: int,
+):
+    assert (
+        storage_pipeline.normalize_n_clusters(value)
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        0,
+        1,
+        "1",
+    ],
+)
+def test_normalize_n_clusters_rejects_small_values(
+    value: int | str,
+):
+    with pytest.raises(
+        ValueError,
+        match="Number of clusters must be at least 2",
+    ):
+        storage_pipeline.normalize_n_clusters(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "",
+        "abc",
+        True,
+    ],
+)
+def test_normalize_n_clusters_rejects_invalid_values(
+    value: object,
+):
+    with pytest.raises(
+        TypeError,
+        match="Number of clusters must be an integer",
+    ):
+        storage_pipeline.normalize_n_clusters(value)
+
+
 def test_build_dataset_keys():
     result = storage_pipeline.build_dataset_keys(
         dataset_id="test001",
@@ -117,6 +173,36 @@ def test_build_dataset_keys_supports_empty_prefixes():
     )
 
 
+def test_build_properties_keys():
+    assert storage_pipeline.build_properties_keys(
+        dataset_id="test001",
+        output_prefix="output",
+    ) == (
+        "output/test001_generated_molecules.csv",
+        "output/test001_molecular_properties.csv",
+    )
+
+
+def test_build_fingerprints_keys():
+    assert storage_pipeline.build_fingerprints_keys(
+        dataset_id="test001",
+        output_prefix="output",
+    ) == (
+        "output/test001_molecular_properties.csv",
+        "output/test001_fingerprints.csv",
+    )
+
+
+def test_build_clustering_keys():
+    assert storage_pipeline.build_clustering_keys(
+        dataset_id="test001",
+        output_prefix="output",
+    ) == (
+        "output/test001_fingerprints.csv",
+        "output/test001_clustered_molecules.csv",
+    )
+
+
 def test_require_s3_object_when_object_exists():
     calls: list[dict[str, str]] = []
 
@@ -132,7 +218,6 @@ def test_require_s3_object_when_object_exists():
                 "aws_conn_id": aws_conn_id,
             }
         )
-
         return True
 
     storage_pipeline.require_s3_object(
@@ -171,6 +256,47 @@ def test_require_s3_object_raises_when_object_is_missing():
             bucket_name="test-bucket",
             aws_conn_id="test-connection",
             object_exists=fake_object_exists,
+        )
+
+
+def test_fingerprint_strings_to_matrix():
+    dataframe = pd.DataFrame(
+        {
+            "fingerprint": [
+                "0101",
+                "1100",
+            ]
+        }
+    )
+
+    matrix = storage_pipeline.fingerprint_strings_to_matrix(
+        dataframe
+    )
+
+    assert matrix.dtype == np.uint8
+    assert matrix.shape == (2, 4)
+    assert matrix.tolist() == [
+        [0, 1, 0, 1],
+        [1, 1, 0, 0],
+    ]
+
+
+def test_fingerprint_strings_to_matrix_rejects_invalid_bits():
+    dataframe = pd.DataFrame(
+        {
+            "fingerprint": [
+                "0101",
+                "01x1",
+            ]
+        }
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="only '0' and '1'",
+    ):
+        storage_pipeline.fingerprint_strings_to_matrix(
+            dataframe
         )
 
 
@@ -252,25 +378,8 @@ def test_process_s3_dataset():
 
     assert len(uploaded_objects) == 1
 
-    uploaded_object = uploaded_objects[0]
-
-    assert uploaded_object["key"] == (
-        "output/test001_generated_molecules.csv"
-    )
-
-    assert uploaded_object["bucket_name"] == (
-        "test-bucket"
-    )
-
-    assert uploaded_object["aws_conn_id"] == (
-        "test-connection"
-    )
-
-    assert uploaded_object["replace"] is True
-    assert isinstance(uploaded_object["data"], bytes)
-
     uploaded_dataframe = pd.read_csv(
-        BytesIO(uploaded_object["data"])
+        BytesIO(uploaded_objects[0]["data"])
     )
 
     assert len(uploaded_dataframe) == 100
@@ -283,156 +392,20 @@ def test_process_s3_dataset():
         "generated_smiles",
     ]
 
-    assert (
-        uploaded_dataframe["scaffold_id"].nunique()
-        == 10
+
+def test_process_properties_s3_dataset():
+    input_dataframe = pd.DataFrame(
+        {
+            "scaffold_id": [1, 2],
+            "r_group_id": [1, 2],
+            "generated_smiles": [
+                "CCO",
+                "c1ccccc1",
+            ],
+        }
     )
 
-    assert (
-        uploaded_dataframe["r_group_id"].nunique()
-        == 10
-    )
-
-    assert (
-        uploaded_dataframe[
-            [
-                "scaffold_id",
-                "r_group_id",
-            ]
-        ]
-        .drop_duplicates()
-        .shape[0]
-        == 100
-    )
-
-    assert (
-        uploaded_dataframe[
-            "generated_smiles"
-        ]
-        .str.strip()
-        .ne("")
-        .all()
-    )
-
-
-def test_process_s3_dataset_stops_when_scaffolds_are_missing():
-    checked_keys: list[str] = []
-    download_was_called = False
-    upload_was_called = False
-
-    def fake_object_exists(
-        key: str,
-        bucket_name: str,
-        aws_conn_id: str,
-    ) -> bool:
-        checked_keys.append(key)
-
-        return key != (
-            "input/test001_scaffolds.csv"
-        )
-
-    def fake_download_object(
-        key: str,
-        bucket_name: str,
-        aws_conn_id: str,
-    ) -> bytes:
-        nonlocal download_was_called
-        download_was_called = True
-        return b""
-
-    def fake_upload_bytes(
-        data: bytes,
-        key: str,
-        bucket_name: str,
-        aws_conn_id: str,
-        replace: bool,
-    ) -> None:
-        nonlocal upload_was_called
-        upload_was_called = True
-
-    with pytest.raises(
-        FileNotFoundError,
-        match="test001_scaffolds.csv",
-    ):
-        storage_pipeline.process_s3_dataset(
-            dataset_id="test001",
-            object_exists=fake_object_exists,
-            download_object=fake_download_object,
-            upload_bytes=fake_upload_bytes,
-            bucket_name="test-bucket",
-            aws_conn_id="test-connection",
-        )
-
-    assert checked_keys == [
-        "input/test001_scaffolds.csv",
-    ]
-
-    assert download_was_called is False
-    assert upload_was_called is False
-
-
-def test_process_s3_dataset_stops_when_r_groups_are_missing():
-    checked_keys: list[str] = []
-    download_was_called = False
-    upload_was_called = False
-
-    def fake_object_exists(
-        key: str,
-        bucket_name: str,
-        aws_conn_id: str,
-    ) -> bool:
-        checked_keys.append(key)
-
-        return key != (
-            "input/test001_r_groups.csv"
-        )
-
-    def fake_download_object(
-        key: str,
-        bucket_name: str,
-        aws_conn_id: str,
-    ) -> bytes:
-        nonlocal download_was_called
-        download_was_called = True
-        return b""
-
-    def fake_upload_bytes(
-        data: bytes,
-        key: str,
-        bucket_name: str,
-        aws_conn_id: str,
-        replace: bool,
-    ) -> None:
-        nonlocal upload_was_called
-        upload_was_called = True
-
-    with pytest.raises(
-        FileNotFoundError,
-        match="test001_r_groups.csv",
-    ):
-        storage_pipeline.process_s3_dataset(
-            dataset_id="test001",
-            object_exists=fake_object_exists,
-            download_object=fake_download_object,
-            upload_bytes=fake_upload_bytes,
-            bucket_name="test-bucket",
-            aws_conn_id="test-connection",
-        )
-
-    assert checked_keys == [
-        "input/test001_scaffolds.csv",
-        "input/test001_r_groups.csv",
-    ]
-
-    assert download_was_called is False
-    assert upload_was_called is False
-
-
-def test_process_s3_dataset_passes_replace_false():
-    scaffolds_raw = SCAFFOLDS_PATH.read_bytes()
-    r_groups_raw = R_GROUPS_PATH.read_bytes()
-
-    uploaded_replace_values: list[bool] = []
+    uploaded_objects: list[dict[str, object]] = []
 
     def fake_object_exists(
         key: str,
@@ -446,10 +419,12 @@ def test_process_s3_dataset_passes_replace_false():
         bucket_name: str,
         aws_conn_id: str,
     ) -> bytes:
-        if key.endswith("_scaffolds.csv"):
-            return scaffolds_raw
-
-        return r_groups_raw
+        assert key == (
+            "output/test001_generated_molecules.csv"
+        )
+        return input_dataframe.to_csv(
+            index=False
+        ).encode("utf-8")
 
     def fake_upload_bytes(
         data: bytes,
@@ -458,16 +433,256 @@ def test_process_s3_dataset_passes_replace_false():
         aws_conn_id: str,
         replace: bool,
     ) -> None:
-        uploaded_replace_values.append(replace)
+        uploaded_objects.append(
+            {
+                "data": data,
+                "key": key,
+                "replace": replace,
+            }
+        )
 
-    storage_pipeline.process_s3_dataset(
-        dataset_id="test001",
-        object_exists=fake_object_exists,
-        download_object=fake_download_object,
-        upload_bytes=fake_upload_bytes,
-        bucket_name="test-bucket",
-        aws_conn_id="test-connection",
-        replace=False,
+    output_key = (
+        storage_pipeline.process_properties_s3_dataset(
+            dataset_id="test001",
+            object_exists=fake_object_exists,
+            download_object=fake_download_object,
+            upload_bytes=fake_upload_bytes,
+            bucket_name="test-bucket",
+            aws_conn_id="test-connection",
+            output_prefix="output",
+            replace=True,
+        )
     )
 
-    assert uploaded_replace_values == [False]
+    assert output_key == (
+        "output/test001_molecular_properties.csv"
+    )
+    assert len(uploaded_objects) == 1
+    assert uploaded_objects[0]["key"] == output_key
+    assert uploaded_objects[0]["replace"] is True
+
+    output_dataframe = pd.read_csv(
+        BytesIO(uploaded_objects[0]["data"])
+    )
+
+    assert len(output_dataframe) == 2
+    assert "canonical_smiles" in output_dataframe.columns
+    assert "mol_weight" in output_dataframe.columns
+    assert "lipinski_pass" in output_dataframe.columns
+
+
+def test_process_fingerprints_s3_dataset():
+    input_dataframe = pd.DataFrame(
+        {
+            "scaffold_id": [1, 2],
+            "r_group_id": [1, 2],
+            "generated_smiles": [
+                "CCO",
+                "c1ccccc1",
+            ],
+            "canonical_smiles": [
+                "CCO",
+                "c1ccccc1",
+            ],
+        }
+    )
+
+    uploaded_objects: list[dict[str, object]] = []
+
+    def fake_object_exists(
+        key: str,
+        bucket_name: str,
+        aws_conn_id: str,
+    ) -> bool:
+        return True
+
+    def fake_download_object(
+        key: str,
+        bucket_name: str,
+        aws_conn_id: str,
+    ) -> bytes:
+        assert key == (
+            "output/test001_molecular_properties.csv"
+        )
+        return input_dataframe.to_csv(
+            index=False
+        ).encode("utf-8")
+
+    def fake_upload_bytes(
+        data: bytes,
+        key: str,
+        bucket_name: str,
+        aws_conn_id: str,
+        replace: bool,
+    ) -> None:
+        uploaded_objects.append(
+            {
+                "data": data,
+                "key": key,
+            }
+        )
+
+    output_key = (
+        storage_pipeline.process_fingerprints_s3_dataset(
+            dataset_id="test001",
+            object_exists=fake_object_exists,
+            download_object=fake_download_object,
+            upload_bytes=fake_upload_bytes,
+            bucket_name="test-bucket",
+            aws_conn_id="test-connection",
+            output_prefix="output",
+        )
+    )
+
+    assert output_key == (
+        "output/test001_fingerprints.csv"
+    )
+
+    output_dataframe = pd.read_csv(
+        BytesIO(uploaded_objects[0]["data"]),
+        dtype={
+            "fingerprint": str,
+            "fingerprint_on_bits": str,
+        },
+    )
+
+    assert len(output_dataframe) == 2
+    assert "fingerprint_type" in output_dataframe.columns
+    assert "fingerprint" in output_dataframe.columns
+    assert "fingerprint_on_bits" in output_dataframe.columns
+    assert output_dataframe[
+        "fingerprint"
+    ].str.len().eq(2048).all()
+
+
+def test_process_clustering_s3_dataset():
+    fingerprint_a = "0" * 2047 + "1"
+    fingerprint_b = "0" * 2046 + "10"
+    fingerprint_c = "1" + "0" * 2047
+    fingerprint_d = "01" + "0" * 2046
+
+    input_dataframe = pd.DataFrame(
+        {
+            "canonical_smiles": [
+                "CCO",
+                "CCN",
+                "c1ccccc1",
+                "c1ccncc1",
+            ],
+            "fingerprint": [
+                fingerprint_a,
+                fingerprint_b,
+                fingerprint_c,
+                fingerprint_d,
+            ],
+        }
+    )
+
+    uploaded_objects: list[dict[str, object]] = []
+
+    def fake_object_exists(
+        key: str,
+        bucket_name: str,
+        aws_conn_id: str,
+    ) -> bool:
+        return True
+
+    def fake_download_object(
+        key: str,
+        bucket_name: str,
+        aws_conn_id: str,
+    ) -> bytes:
+        assert key == (
+            "output/test001_fingerprints.csv"
+        )
+        return input_dataframe.to_csv(
+            index=False
+        ).encode("utf-8")
+
+    def fake_upload_bytes(
+        data: bytes,
+        key: str,
+        bucket_name: str,
+        aws_conn_id: str,
+        replace: bool,
+    ) -> None:
+        uploaded_objects.append(
+            {
+                "data": data,
+                "key": key,
+            }
+        )
+
+    output_key = (
+        storage_pipeline.process_clustering_s3_dataset(
+            dataset_id="test001",
+            object_exists=fake_object_exists,
+            download_object=fake_download_object,
+            upload_bytes=fake_upload_bytes,
+            n_clusters="2",
+            bucket_name="test-bucket",
+            aws_conn_id="test-connection",
+            output_prefix="output",
+        )
+    )
+
+    assert output_key == (
+        "output/test001_clustered_molecules.csv"
+    )
+
+    output_dataframe = pd.read_csv(
+        BytesIO(uploaded_objects[0]["data"])
+    )
+
+    assert len(output_dataframe) == 4
+    assert "cluster_id" in output_dataframe.columns
+    assert "distance_to_centroid" in output_dataframe.columns
+    assert output_dataframe["cluster_id"].nunique() == 2
+
+
+def test_processing_stops_when_input_is_missing():
+    download_was_called = False
+    upload_was_called = False
+
+    def fake_object_exists(
+        key: str,
+        bucket_name: str,
+        aws_conn_id: str,
+    ) -> bool:
+        return False
+
+    def fake_download_object(
+        key: str,
+        bucket_name: str,
+        aws_conn_id: str,
+    ) -> bytes:
+        nonlocal download_was_called
+        download_was_called = True
+        return b""
+
+    def fake_upload_bytes(
+        data: bytes,
+        key: str,
+        bucket_name: str,
+        aws_conn_id: str,
+        replace: bool,
+    ) -> None:
+        nonlocal upload_was_called
+        upload_was_called = True
+
+    with pytest.raises(
+        FileNotFoundError,
+        match="test001_generated_molecules.csv",
+    ):
+        storage_pipeline.process_properties_s3_dataset(
+            dataset_id="test001",
+            object_exists=fake_object_exists,
+            download_object=fake_download_object,
+            upload_bytes=fake_upload_bytes,
+            bucket_name="test-bucket",
+            aws_conn_id="test-connection",
+            output_prefix="output",
+        )
+
+    assert download_was_called is False
+    assert upload_was_called is False
