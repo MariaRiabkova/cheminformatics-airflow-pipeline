@@ -1,7 +1,7 @@
 import pytest
 from rdkit import Chem
 
-from dags.lib.molecules.generation import (
+from lib.molecules.generation import (
     generate_molecule,
     validate_generated_molecule,
 )

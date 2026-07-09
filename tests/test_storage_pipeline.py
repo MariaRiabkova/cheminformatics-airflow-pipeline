@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from dags.lib.molecules import storage_pipeline
+from lib.molecules import storage_pipeline
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

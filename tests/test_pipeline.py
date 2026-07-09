@@ -2,11 +2,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from dags.lib.molecules.pipeline import (
+from lib.molecules.pipeline import (
     generate_molecules_dataframe,
     generate_molecules_from_csv_bytes,
 )
-from dags.lib.molecules.smiles_parser import (
+from lib.molecules.smiles_parser import (
     dataframe_to_csv_bytes,
     parse_smiles_csv,
 )

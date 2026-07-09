@@ -4,8 +4,8 @@ from itertools import product
 
 import pandas as pd
 
-from dags.lib.molecules.generation import generate_molecule
-from dags.lib.molecules.smiles_parser import parse_smiles_csv
+from lib.molecules.generation import generate_molecule
+from lib.molecules.smiles_parser import parse_smiles_csv
 
 
 SMILES_COLUMN = "smiles"

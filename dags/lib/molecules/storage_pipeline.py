@@ -3,10 +3,10 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 
-from dags.lib.molecules.pipeline import (
+from lib.molecules.pipeline import (
     generate_molecules_from_csv_bytes,
 )
-from dags.lib.molecules.smiles_parser import (
+from lib.molecules.smiles_parser import (
     dataframe_to_csv_bytes,
 )
 
