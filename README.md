@@ -1,10 +1,10 @@
-# Feature: Molecule Generation — Step 1
+# Cheminformatics Airflow Pipeline
 
-Branch: `feature/molecule-generation-step1`
+Current branch: `feature/molecular-properties-and-clustering`
 
 ## Goal
 
-Implement the first iteration of the cheminformatics pipeline.
+Implement a cheminformatics pipeline that generates molecules, calculates molecular properties, creates ECFP4 fingerprints, and clusters molecules with K-means.
 
 The pipeline must:
 
@@ -14,8 +14,11 @@ The pipeline must:
    - `<dataset_id>_r_groups.csv`
 3. Generate molecules for every scaffold × R-group combination.
 4. Validate every generated molecule.
-5. Save the generated molecules as a CSV file.
-6. Run end-to-end through Airflow and MinIO.
+5. Calculate molecular properties with RDKit.
+6. Generate ECFP4 fingerprints.
+7. Cluster molecules with K-means.
+8. Save each processing stage as a separate CSV file.
+9. Run end-to-end through Airflow and MinIO.
 
 ## Input files
 
@@ -32,10 +35,13 @@ bronze/input/test001_scaffolds.csv
 bronze/input/test001_r_groups.csv
 ```
 
-The output is written to:
+The outputs are written to:
 
 ```text
 bronze/output/test001_generated_molecules.csv
+bronze/output/test001_molecular_properties.csv
+bronze/output/test001_fingerprints.csv
+bronze/output/test001_clustered_molecules.csv
 ```
 
 The bucket name and object prefixes are configurable through environment variables.
@@ -154,6 +160,88 @@ scaffold_id,r_group_id,scaffold_smiles,r_group_smiles,generated_smiles
 0,0,c1ccc([*:1])cc1,[*:1]C,Cc1ccccc1
 ```
 
+## Molecular properties
+
+The properties stage reads:
+
+```text
+output/<dataset_id>_generated_molecules.csv
+```
+
+It preserves all input columns and adds:
+
+```text
+canonical_smiles
+mol_formula
+mol_weight
+log_p
+tpsa
+hba
+hbd
+rotatable_bonds
+aromatic_rings
+heavy_atom_count
+hetero_atom_count
+ring_count
+fraction_csp3
+formal_charge
+qed
+lipinski_pass
+```
+
+Invalid generated SMILES are not skipped. The processing task fails immediately.
+
+## ECFP4 fingerprints
+
+Fingerprints are calculated from `canonical_smiles`.
+
+Configuration:
+
+```text
+fingerprint type: ECFP4
+Morgan radius: 2
+fingerprint size: 2048 bits
+```
+
+The fingerprint stage adds:
+
+```text
+fingerprint_type
+fingerprint
+fingerprint_on_bits
+```
+
+The `fingerprint` column stores a 2048-character binary string.
+
+Fingerprints are calculated once for each unique canonical SMILES and then mapped back to all source rows.
+
+## K-means clustering
+
+Clustering uses the ECFP4 fingerprint matrix rather than molecular properties.
+
+The clustering stage adds:
+
+```text
+cluster_id
+distance_to_centroid
+```
+
+Default configuration:
+
+```text
+n_clusters = 5
+random_state = 42
+n_init = 10
+```
+
+The default cluster count can be configured with:
+
+```env
+MOLECULES_DEFAULT_N_CLUSTERS=5
+```
+
+The value can be overridden when the DAG is triggered manually.
+
 ## Project structure
 
 ```text
@@ -162,8 +250,11 @@ dags/
 └── lib/
     ├── molecules/
     │   ├── __init__.py
+    │   ├── clustering.py
+    │   ├── fingerprints.py
     │   ├── generation.py
     │   ├── pipeline.py
+    │   ├── properties.py
     │   ├── smiles_parser.py
     │   └── storage_pipeline.py
     └── utils/
@@ -177,8 +268,11 @@ tests/
 │   │   └── test001_r_groups.csv
 │   └── output/
 │       └── test001_generated_molecules.csv
+├── test_clustering.py
+├── test_fingerprints.py
 ├── test_generation.py
 ├── test_pipeline.py
+├── test_properties.py
 └── test_storage_pipeline.py
 ```
 
@@ -221,7 +315,10 @@ dataset_id
 → check input objects
 → download CSV files
 → generate molecules
-→ upload output CSV
+→ calculate properties
+→ generate fingerprints
+→ cluster molecules
+→ upload stage outputs
 ```
 
 The S3 functions are injected into this layer, which allows the business logic to be tested locally without requiring Airflow.
@@ -233,9 +330,10 @@ Contains the thin Airflow DAG wrapper.
 The DAG:
 
 - accepts `dataset_id`;
+- accepts `n_clusters`;
 - uses the `aws_s3` Airflow connection;
 - calls the storage pipeline;
-- contains no molecule-generation logic.
+- contains no cheminformatics business logic.
 
 ## Airflow DAG
 
@@ -259,7 +357,8 @@ Example DAG parameters:
 
 ```json
 {
-  "dataset_id": "test001"
+  "dataset_id": "test001",
+  "n_clusters": 5
 }
 ```
 
@@ -271,6 +370,7 @@ MINIO_BUCKET=bronze
 MOLECULES_AWS_CONN_ID=aws_s3
 MOLECULES_INPUT_PREFIX=input
 MOLECULES_OUTPUT_PREFIX=output
+MOLECULES_DEFAULT_N_CLUSTERS=5
 ```
 
 The Airflow connection is provided through:
@@ -286,6 +386,33 @@ http://storage:9000
 ```
 
 Credentials must not be committed to Git.
+
+## Dependencies
+
+Main project dependencies:
+
+```text
+apache-airflow-providers-postgres>=6.0.0
+apache-airflow-providers-amazon>=9.0.0
+pandas>=2.2.0
+rdkit>=2023.9.1
+pandera>=0.20.0
+soda-core-postgres>=3.3.0
+scikit-learn>=1.5.0
+```
+
+After dependency changes, rebuild the Docker images:
+
+```powershell
+docker compose build
+docker compose up -d
+```
+
+Verify scikit-learn inside Airflow:
+
+```powershell
+docker compose exec airflow-scheduler python -c "import sklearn; print(sklearn.__version__)"
+```
 
 ## Tests
 
@@ -315,7 +442,15 @@ The test suite covers:
 - missing S3 objects;
 - S3 processing with injected test functions;
 - output upload parameters;
-- generation of 100 molecules from 10 × 10 fixture inputs.
+- generation of 100 molecules from 10 × 10 fixture inputs;
+- molecular properties calculation;
+- Lipinski rule evaluation;
+- ECFP4 fingerprint shape and determinism;
+- equivalent-SMILES fingerprint consistency;
+- fingerprint serialization and matrix reconstruction;
+- K-means clustering validation;
+- deterministic clustering;
+- storage orchestration for every output stage.
 
 ## Test fixtures
 
@@ -342,13 +477,15 @@ tests/fixture/output/test001_generated_molecules.csv
 
 ## End-to-end verification
 
-The pipeline was tested through:
+The complete pipeline was tested through:
 
 ```text
 MinIO input
 → Airflow DAG
-→ CSV parser
 → molecule generation
+→ molecular properties calculation
+→ ECFP4 fingerprint generation
+→ K-means clustering
 → CSV serialization
 → MinIO output
 ```
@@ -360,21 +497,47 @@ bronze/input/test001_scaffolds.csv
 bronze/input/test001_r_groups.csv
 ```
 
-Generated object:
+Generated objects:
 
 ```text
 bronze/output/test001_generated_molecules.csv
+bronze/output/test001_molecular_properties.csv
+bronze/output/test001_fingerprints.csv
+bronze/output/test001_clustered_molecules.csv
 ```
 
-The generated file contains:
+Verification results:
 
 ```text
-100 rows
-5 columns
-100 unique scaffold_id × r_group_id combinations
+test001_generated_molecules.csv: 100 rows × 5 columns
+test001_molecular_properties.csv: 100 rows × 21 columns
+test001_fingerprints.csv: 100 rows × 24 columns
+test001_clustered_molecules.csv: 100 rows × 26 columns
 ```
 
-The Airflow DAG run completed successfully.
+Additional checks:
+
+```text
+100 unique scaffold_id × r_group_id combinations
+fingerprint matrix shape: 100 × 2048
+fingerprint type: ECFP4
+fingerprint length: 2048 bits
+number of clusters: 5
+missing values: 0
+duplicate full rows: 0
+```
+
+Cluster distribution:
+
+```text
+cluster 0: 12 molecules
+cluster 1: 10 molecules
+cluster 2: 40 molecules
+cluster 3: 28 molecules
+cluster 4: 10 molecules
+```
+
+All Airflow tasks completed successfully and all four output files were written to MinIO.
 
 ## Current implementation status
 
@@ -399,11 +562,18 @@ Completed:
 - [x] Run end-to-end test with `test001`
 - [x] Generate and validate 100 output molecules
 
-Next:
+Current feature work:
 
-- [ ] Open pull request: `feature/molecule-generation-step1` → `dev`
-- [ ] Review and merge Step 1 into `dev`
-- [ ] Start molecular property calculation feature
+- [x] Calculate molecular properties with RDKit
+- [x] Generate ECFP4 fingerprints
+- [x] Cluster fingerprints with K-means
+- [x] Add storage orchestration for all processing stages
+- [x] Extend the Airflow DAG with separate tasks
+- [x] Add tests for properties, fingerprints, clustering, and storage
+- [x] Rebuild the Docker images with scikit-learn
+- [x] Run the complete pipeline end-to-end through Airflow and MinIO
+- [x] Validate all four generated output files
+- [ ] Open a pull request to `dev`
 
 ## Development order
 
