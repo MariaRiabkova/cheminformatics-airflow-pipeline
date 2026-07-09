@@ -1,0 +1,11 @@
+smiles
+c1ccc([*:1])cc1
+c1cc([*:1])ncc1
+C1CCC([*:1])CC1
+CC([*:1])C
+CC(=O)N[*:1]
+c1ccc2cc([*:1])ccc2c1
+c1ccoc1[*:1]
+c1ccsc1[*:1]
+N1CCN(CC1)[*:1]
+CCOC(=O)N[*:1]
