@@ -678,10 +678,6 @@ Validation completed:
 - [x] Step 2 end-to-end verification completed successfully
 - [x] DAG works correctly with Airflow and MinIO
 
-Release steps:
-
-- [ ] Open a pull request to `dev`
-- [ ] Merge the pull request into `dev`
 
 ## Branch policy
 
