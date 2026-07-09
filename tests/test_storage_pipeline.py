@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 
@@ -686,3 +687,380 @@ def test_processing_stops_when_input_is_missing():
 
     assert download_was_called is False
     assert upload_was_called is False
+
+INTERVAL_START = datetime(
+    2026,
+    7,
+    6,
+    3,
+    0,
+    tzinfo=timezone.utc,
+)
+
+INTERVAL_END = INTERVAL_START + timedelta(
+    days=7
+)
+
+
+def test_discover_s3_datasets_to_process():
+    calls: list[tuple[str, str, str]] = []
+
+    def fake_list_objects(
+        prefix: str,
+        bucket_name: str,
+        aws_conn_id: str,
+    ) -> list[dict[str, object]]:
+        calls.append(
+            (
+                prefix,
+                bucket_name,
+                aws_conn_id,
+            )
+        )
+
+        if prefix == "input":
+            return [
+                {
+                    "key": "input/test001_scaffolds.csv",
+                    "last_modified": (
+                        INTERVAL_START
+                        + timedelta(days=1)
+                    ),
+                },
+                {
+                    "key": "input/test001_r_groups.csv",
+                    "last_modified": (
+                        INTERVAL_START
+                        + timedelta(days=1)
+                    ),
+                },
+                {
+                    "key": "input/test002_scaffolds.csv",
+                    "last_modified": (
+                        INTERVAL_START
+                        + timedelta(days=2)
+                    ),
+                },
+                {
+                    "key": "input/test002_r_groups.csv",
+                    "last_modified": (
+                        INTERVAL_START
+                        - timedelta(days=2)
+                    ),
+                },
+                {
+                    "key": "input/test003_scaffolds.csv",
+                    "last_modified": (
+                        INTERVAL_START
+                        + timedelta(days=3)
+                    ),
+                },
+            ]
+
+        if prefix == "output":
+            return [
+                {
+                    "key": (
+                        "output/"
+                        "test001_clustered_molecules.csv"
+                    ),
+                    "last_modified": (
+                        INTERVAL_START
+                        - timedelta(days=5)
+                    ),
+                },
+            ]
+
+        raise AssertionError(
+            f"Unexpected prefix: {prefix}"
+        )
+
+    result = (
+        storage_pipeline.discover_s3_datasets_to_process(
+            list_objects=fake_list_objects,
+            interval_start=INTERVAL_START,
+            interval_end=INTERVAL_END,
+            overwrite=False,
+            bucket_name="test-bucket",
+            aws_conn_id="test-connection",
+            input_prefix="input",
+            output_prefix="output",
+        )
+    )
+
+    assert result == ["test002"]
+
+    assert calls == [
+        (
+            "input",
+            "test-bucket",
+            "test-connection",
+        ),
+        (
+            "output",
+            "test-bucket",
+            "test-connection",
+        ),
+    ]
+
+
+def test_discover_s3_datasets_to_process_with_overwrite():
+    def fake_list_objects(
+        prefix: str,
+        bucket_name: str,
+        aws_conn_id: str,
+    ) -> list[dict[str, object]]:
+        if prefix == "input":
+            return [
+                {
+                    "key": "input/test001_scaffolds.csv",
+                    "last_modified": (
+                        INTERVAL_START
+                        - timedelta(days=10)
+                    ),
+                },
+                {
+                    "key": "input/test001_r_groups.csv",
+                    "last_modified": (
+                        INTERVAL_START
+                        - timedelta(days=10)
+                    ),
+                },
+                {
+                    "key": "input/test002_scaffolds.csv",
+                    "last_modified": (
+                        INTERVAL_START
+                        - timedelta(days=10)
+                    ),
+                },
+                {
+                    "key": "input/test002_r_groups.csv",
+                    "last_modified": (
+                        INTERVAL_START
+                        - timedelta(days=10)
+                    ),
+                },
+            ]
+
+        if prefix == "output":
+            return [
+                {
+                    "key": (
+                        "output/"
+                        "test001_clustered_molecules.csv"
+                    ),
+                    "last_modified": (
+                        INTERVAL_START
+                        - timedelta(days=5)
+                    ),
+                },
+            ]
+
+        raise AssertionError(
+            f"Unexpected prefix: {prefix}"
+        )
+
+    result = (
+        storage_pipeline.discover_s3_datasets_to_process(
+            list_objects=fake_list_objects,
+            interval_start=INTERVAL_START,
+            interval_end=INTERVAL_END,
+            overwrite=True,
+            bucket_name="test-bucket",
+            aws_conn_id="test-connection",
+            input_prefix="input",
+            output_prefix="output",
+        )
+    )
+
+    assert result == [
+        "test001",
+        "test002",
+    ]
+
+
+def test_process_complete_s3_dataset(
+    monkeypatch,
+):
+    calls: list[dict[str, object]] = []
+
+    def fake_process_s3_dataset(**kwargs):
+        calls.append(
+            {
+                "stage": "generation",
+                **kwargs,
+            }
+        )
+        return "output/test001_generated_molecules.csv"
+
+    def fake_process_properties_s3_dataset(**kwargs):
+        calls.append(
+            {
+                "stage": "properties",
+                **kwargs,
+            }
+        )
+        return "output/test001_molecular_properties.csv"
+
+    def fake_process_fingerprints_s3_dataset(**kwargs):
+        calls.append(
+            {
+                "stage": "fingerprints",
+                **kwargs,
+            }
+        )
+        return "output/test001_fingerprints.csv"
+
+    def fake_process_clustering_s3_dataset(**kwargs):
+        calls.append(
+            {
+                "stage": "clustering",
+                **kwargs,
+            }
+        )
+        return "output/test001_clustered_molecules.csv"
+
+    monkeypatch.setattr(
+        storage_pipeline,
+        "process_s3_dataset",
+        fake_process_s3_dataset,
+    )
+    monkeypatch.setattr(
+        storage_pipeline,
+        "process_properties_s3_dataset",
+        fake_process_properties_s3_dataset,
+    )
+    monkeypatch.setattr(
+        storage_pipeline,
+        "process_fingerprints_s3_dataset",
+        fake_process_fingerprints_s3_dataset,
+    )
+    monkeypatch.setattr(
+        storage_pipeline,
+        "process_clustering_s3_dataset",
+        fake_process_clustering_s3_dataset,
+    )
+
+    def fake_object_exists(
+        key: str,
+        bucket_name: str,
+        aws_conn_id: str,
+    ) -> bool:
+        return True
+
+    def fake_download_object(
+        key: str,
+        bucket_name: str,
+        aws_conn_id: str,
+    ) -> bytes:
+        return b""
+
+    def fake_upload_bytes(
+        data: bytes,
+        key: str,
+        bucket_name: str,
+        aws_conn_id: str,
+        replace: bool,
+    ) -> None:
+        return None
+
+    result = storage_pipeline.process_complete_s3_dataset(
+        dataset_id="test001",
+        object_exists=fake_object_exists,
+        download_object=fake_download_object,
+        upload_bytes=fake_upload_bytes,
+        overwrite=True,
+        n_clusters="5",
+        bucket_name="test-bucket",
+        aws_conn_id="test-connection",
+        input_prefix="input",
+        output_prefix="output",
+    )
+
+    assert result == {
+        "generated_molecules": (
+            "output/test001_generated_molecules.csv"
+        ),
+        "molecular_properties": (
+            "output/test001_molecular_properties.csv"
+        ),
+        "fingerprints": (
+            "output/test001_fingerprints.csv"
+        ),
+        "clustered_molecules": (
+            "output/test001_clustered_molecules.csv"
+        ),
+    }
+
+    assert [
+        call["stage"]
+        for call in calls
+    ] == [
+        "generation",
+        "properties",
+        "fingerprints",
+        "clustering",
+    ]
+
+    assert all(
+        call["dataset_id"] == "test001"
+        for call in calls
+    )
+
+    assert all(
+        call["replace"] is True
+        for call in calls
+    )
+
+    assert calls[0]["input_prefix"] == "input"
+    assert calls[0]["output_prefix"] == "output"
+    assert calls[3]["n_clusters"] == "5"
+
+
+def test_process_complete_s3_dataset_passes_overwrite_false(
+    monkeypatch,
+):
+    replace_values: list[bool] = []
+
+    def fake_stage(**kwargs):
+        replace_values.append(
+            kwargs["replace"]
+        )
+        return "output/result.csv"
+
+    monkeypatch.setattr(
+        storage_pipeline,
+        "process_s3_dataset",
+        fake_stage,
+    )
+    monkeypatch.setattr(
+        storage_pipeline,
+        "process_properties_s3_dataset",
+        fake_stage,
+    )
+    monkeypatch.setattr(
+        storage_pipeline,
+        "process_fingerprints_s3_dataset",
+        fake_stage,
+    )
+    monkeypatch.setattr(
+        storage_pipeline,
+        "process_clustering_s3_dataset",
+        fake_stage,
+    )
+
+    storage_pipeline.process_complete_s3_dataset(
+        dataset_id="test001",
+        object_exists=lambda *args: True,
+        download_object=lambda *args: b"",
+        upload_bytes=lambda *args: None,
+        overwrite=False,
+    )
+
+    assert replace_values == [
+        False,
+        False,
+        False,
+        False,
+    ]
+
