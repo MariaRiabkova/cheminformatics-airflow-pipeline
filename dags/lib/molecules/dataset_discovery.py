@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+from datetime import datetime
+from typing import TypedDict
+
 
 SCAFFOLDS_SUFFIX = "_scaffolds.csv"
 R_GROUPS_SUFFIX = "_r_groups.csv"
 FINAL_OUTPUT_SUFFIX = "_clustered_molecules.csv"
 
 
-def normalize_prefix(
-    prefix: str,
-) -> str:
+class S3ObjectMetadata(TypedDict):
+    """Metadata required for S3 dataset discovery."""
+
+    key: str
+    last_modified: datetime
+
+
+def normalize_prefix(prefix: str) -> str:
     """Normalize an S3 prefix."""
     if not isinstance(prefix, str):
         raise TypeError(
@@ -43,7 +51,6 @@ def extract_dataset_id(
 
     filename = key[len(normalized_prefix):]
 
-    # Ignore objects located in nested folders.
     if "/" in filename:
         return None
 
@@ -101,6 +108,67 @@ def discover_complete_datasets(
     )
 
 
+def discover_changed_datasets(
+    input_objects: list[S3ObjectMetadata],
+    interval_start: datetime,
+    interval_end: datetime,
+    input_prefix: str = "input",
+) -> set[str]:
+    """Return dataset IDs changed during the current data interval."""
+    if not isinstance(input_objects, list):
+        raise TypeError(
+            "Input objects must be provided as a list"
+        )
+
+    if not isinstance(interval_start, datetime):
+        raise TypeError(
+            "Interval start must be a datetime"
+        )
+
+    if not isinstance(interval_end, datetime):
+        raise TypeError(
+            "Interval end must be a datetime"
+        )
+
+    if interval_start >= interval_end:
+        raise ValueError(
+            "Interval start must be earlier than interval end"
+        )
+
+    changed_datasets: set[str] = set()
+
+    for object_metadata in input_objects:
+        key = object_metadata["key"]
+        last_modified = object_metadata[
+            "last_modified"
+        ]
+
+        if not (
+            interval_start
+            <= last_modified
+            < interval_end
+        ):
+            continue
+
+        for suffix in (
+            SCAFFOLDS_SUFFIX,
+            R_GROUPS_SUFFIX,
+        ):
+            dataset_id = extract_dataset_id(
+                key=key,
+                prefix=input_prefix,
+                suffix=suffix,
+            )
+
+            if dataset_id is not None:
+                changed_datasets.add(
+                    dataset_id
+                )
+                break
+
+    return changed_datasets
+
+
 def discover_processed_datasets(
     output_keys: list[str],
     output_prefix: str = "output",
@@ -128,65 +196,52 @@ def discover_processed_datasets(
     return processed_datasets
 
 
-def select_datasets_to_process(
-    complete_dataset_ids: list[str],
-    output_keys: list[str],
-    overwrite: bool = False,
-    output_prefix: str = "output",
-) -> list[str]:
-    """Select complete datasets that require processing."""
-    if not isinstance(
-        complete_dataset_ids,
-        list,
-    ):
-        raise TypeError(
-            "Dataset IDs must be provided as a list"
-        )
-
-    if not isinstance(overwrite, bool):
-        raise TypeError(
-            "Overwrite must be a boolean"
-        )
-
-    normalized_dataset_ids = sorted(
-        set(complete_dataset_ids)
-    )
-
-    if overwrite:
-        return normalized_dataset_ids
-
-    processed_datasets = (
-        discover_processed_datasets(
-            output_keys=output_keys,
-            output_prefix=output_prefix,
-        )
-    )
-
-    return [
-        dataset_id
-        for dataset_id in normalized_dataset_ids
-        if dataset_id not in processed_datasets
-    ]
-
-
 def discover_datasets_to_process(
-    input_keys: list[str],
+    input_objects: list[S3ObjectMetadata],
     output_keys: list[str],
+    interval_start: datetime,
+    interval_end: datetime,
     overwrite: bool = False,
     input_prefix: str = "input",
     output_prefix: str = "output",
 ) -> list[str]:
     """Discover complete datasets that should be processed."""
-    complete_dataset_ids = (
+    if not isinstance(overwrite, bool):
+        raise TypeError(
+            "Overwrite must be a boolean"
+        )
+
+    input_keys = [
+        object_metadata["key"]
+        for object_metadata in input_objects
+    ]
+
+    complete_datasets = set(
         discover_complete_datasets(
             input_keys=input_keys,
             input_prefix=input_prefix,
         )
     )
 
-    return select_datasets_to_process(
-        complete_dataset_ids=complete_dataset_ids,
+    if overwrite:
+        return sorted(
+            complete_datasets
+        )
+
+    changed_datasets = discover_changed_datasets(
+        input_objects=input_objects,
+        interval_start=interval_start,
+        interval_end=interval_end,
+        input_prefix=input_prefix,
+    )
+
+    processed_datasets = discover_processed_datasets(
         output_keys=output_keys,
-        overwrite=overwrite,
         output_prefix=output_prefix,
+    )
+
+    return sorted(
+        complete_datasets
+        & changed_datasets
+        - processed_datasets
     )

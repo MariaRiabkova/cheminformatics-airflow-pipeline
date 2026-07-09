@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 import os
 from collections.abc import Callable
 
@@ -11,7 +13,10 @@ from lib.molecules.fingerprints import calculate_fingerprints_dataframe
 from lib.molecules.pipeline import generate_molecules_from_csv_bytes
 from lib.molecules.properties import calculate_properties_dataframe
 from lib.molecules.smiles_parser import dataframe_to_csv_bytes, read_csv_bytes
-from lib.molecules.dataset_discovery import discover_datasets_to_process
+from lib.molecules.dataset_discovery import (
+    S3ObjectMetadata,
+    discover_datasets_to_process,
+)
 
 
 BUCKET_NAME = os.getenv(
@@ -45,7 +50,10 @@ DEFAULT_N_CLUSTERS = int(
 ObjectExists = Callable[[str, str, str], bool]
 DownloadObject = Callable[[str, str, str], bytes]
 UploadBytes = Callable[[bytes, str, str, str, bool], None]
-ListObjectKeys = Callable[[str, str, str], list[str]]
+ListObjects = Callable[
+    [str, str, str],
+    list[S3ObjectMetadata],
+]
 
 
 def normalize_dataset_id(
@@ -584,7 +592,9 @@ def process_clustering_s3_dataset(
     return output_key
 
 def discover_s3_datasets_to_process(
-    list_object_keys: ListObjectKeys,
+    list_objects: ListObjects,
+    interval_start: datetime,
+    interval_end: datetime,
     overwrite: bool = False,
     bucket_name: str = BUCKET_NAME,
     aws_conn_id: str = AWS_CONN_ID,
@@ -592,21 +602,28 @@ def discover_s3_datasets_to_process(
     output_prefix: str = OUTPUT_PREFIX,
 ) -> list[str]:
     """Discover complete S3 datasets that require processing."""
-    input_keys = list_object_keys(
+    input_objects = list_objects(
         input_prefix,
         bucket_name,
         aws_conn_id,
     )
 
-    output_keys = list_object_keys(
+    output_objects = list_objects(
         output_prefix,
         bucket_name,
         aws_conn_id,
     )
 
+    output_keys = [
+        object_metadata["key"]
+        for object_metadata in output_objects
+    ]
+
     return discover_datasets_to_process(
-        input_keys=input_keys,
+        input_objects=input_objects,
         output_keys=output_keys,
+        interval_start=interval_start,
+        interval_end=interval_end,
         overwrite=overwrite,
         input_prefix=input_prefix,
         output_prefix=output_prefix,
@@ -678,4 +695,3 @@ def process_complete_s3_dataset(
         "fingerprints": fingerprints_key,
         "clustered_molecules": clustered_key,
     }
-

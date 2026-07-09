@@ -1,24 +1,142 @@
 # Cheminformatics Airflow Pipeline
 
-Current branch: `feature/molecular-properties-and-clustering`
+Current branch: `feature/schedule-processing-step2`
 
 ## Goal
 
-Implement a cheminformatics pipeline that generates molecules, calculates molecular properties, creates ECFP4 fingerprints, and clusters molecules with K-means.
+Implement an Airflow pipeline for weekly cheminformatics processing of scaffold and R-group datasets stored in S3-compatible object storage.
 
-The pipeline must:
+The pipeline:
 
-1. Accept a `dataset_id`.
-2. Read two CSV files with the same dataset identifier:
-   - `<dataset_id>_scaffolds.csv`
-   - `<dataset_id>_r_groups.csv`
-3. Generate molecules for every scaffold × R-group combination.
-4. Validate every generated molecule.
-5. Calculate molecular properties with RDKit.
-6. Generate ECFP4 fingerprints.
-7. Cluster molecules with K-means.
-8. Save each processing stage as a separate CSV file.
-9. Run end-to-end through Airflow and MinIO.
+1. discovers new input files added or updated since the previous scheduled run;
+2. identifies complete dataset pairs;
+3. generates molecules for every scaffold × R-group combination;
+4. validates generated molecules with RDKit;
+5. calculates molecular properties;
+6. creates ECFP4 fingerprints;
+7. clusters molecules with K-means;
+8. writes every processing stage to S3-compatible storage.
+
+## Step 2 requirements
+
+The second iteration adds:
+
+- a weekly Airflow schedule;
+- processing of new S3 files since the previous launch;
+- an `overwrite` DAG parameter with the default value `False`;
+- reprocessing and replacement of existing output files when `overwrite=True`.
+
+## Weekly schedule
+
+The DAG runs every Monday at `03:00` in the `Asia/Yerevan` timezone.
+
+```python
+schedule="0 3 * * 1"
+```
+
+The timezone is set explicitly in the DAG:
+
+```python
+DAG_TIMEZONE = pendulum.timezone("Asia/Yerevan")
+```
+
+The DAG uses:
+
+```python
+catchup=False
+```
+
+Therefore, Airflow does not create historical weekly runs before the DAG is enabled.
+
+## Detection of new files
+
+For every object under the input prefix, the S3 helper returns:
+
+```text
+key
+last_modified
+```
+
+Airflow provides the current scheduled interval:
+
+```text
+data_interval_start
+data_interval_end
+```
+
+A file is considered new or updated for the current run when:
+
+```python
+data_interval_start <= last_modified < data_interval_end
+```
+
+For a weekly run at Monday `03:00 Asia/Yerevan`, the interval normally represents:
+
+```text
+previous Monday 03:00
+≤ LastModified <
+current Monday 03:00
+```
+
+The discovery logic then:
+
+1. lists all objects under `input/`;
+2. selects files changed during the current Airflow data interval;
+3. extracts `dataset_id` values;
+4. verifies that both required input files currently exist;
+5. excludes already completed datasets when `overwrite=False`;
+6. returns the datasets that must be processed.
+
+A dataset is complete only when both files exist:
+
+```text
+input/<dataset_id>_scaffolds.csv
+input/<dataset_id>_r_groups.csv
+```
+
+If one file was uploaded earlier and the second file appeared during the current interval, the dataset is processed because the pair is now complete and at least one input file changed during the interval.
+
+## Overwrite behavior
+
+### `overwrite=False`
+
+Default behavior:
+
+```json
+{
+  "overwrite": false
+}
+```
+
+The DAG:
+
+- processes only complete datasets changed during the current data interval;
+- skips datasets that already have the final clustered output;
+- writes new output objects without replacing existing ones.
+
+A dataset is treated as already completed when this object exists:
+
+```text
+output/<dataset_id>_clustered_molecules.csv
+```
+
+### `overwrite=True`
+
+Manual reprocessing behavior:
+
+```json
+{
+  "overwrite": true
+}
+```
+
+The DAG:
+
+- ignores the `LastModified` interval filter;
+- processes every complete dataset pair under `input/`;
+- reprocesses datasets that already have outputs;
+- passes `replace=True` to every S3 upload;
+- overwrites all existing stage outputs.
 
 ## Input files
 
@@ -28,27 +146,18 @@ For a dataset with:
 dataset_id = test001
 ```
 
-the pipeline expects the following MinIO objects:
+the pipeline expects:
 
 ```text
 bronze/input/test001_scaffolds.csv
 bronze/input/test001_r_groups.csv
 ```
 
-The outputs are written to:
-
-```text
-bronze/output/test001_generated_molecules.csv
-bronze/output/test001_molecular_properties.csv
-bronze/output/test001_fingerprints.csv
-bronze/output/test001_clustered_molecules.csv
-```
-
-The bucket name and object prefixes are configurable through environment variables.
+The bucket and prefixes are configurable through environment variables.
 
 ## Input format
 
-The expected CSV format is:
+Expected CSV format:
 
 ```csv
 smiles
@@ -56,7 +165,7 @@ CCC*
 ...
 ```
 
-The parser also supports:
+The parser supports:
 
 - a column named `smiles`;
 - common SMILES column aliases;
@@ -82,9 +191,9 @@ Rules:
 - each R-group must contain exactly one dummy atom;
 - the dummy atom must have exactly one neighbour;
 - both attachment points must either be unnumbered or use the same atom-map number;
-- multiple attachment points are not supported in this iteration.
+- multiple attachment points are rejected.
 
-Examples that must fail:
+Examples that fail:
 
 ```text
 CC[*:1] + [*:2]C
@@ -93,18 +202,18 @@ C([*:1])([*:2]) + [*:1]C
 
 ## Molecule generation
 
-One molecule is generated by:
+For one scaffold and one R-group, the pipeline:
 
-1. parsing the scaffold and R-group SMILES with RDKit;
-2. locating the attachment atoms;
-3. validating attachment-point compatibility;
-4. combining the two RDKit molecules;
-5. creating a bond between the attachment neighbours;
-6. removing the dummy atoms;
-7. validating the generated molecule;
-8. returning canonical SMILES.
+1. parses both SMILES with RDKit;
+2. locates the attachment atoms;
+3. validates attachment-point compatibility;
+4. combines the RDKit molecules;
+5. creates a bond between attachment neighbours;
+6. removes dummy atoms;
+7. validates the generated molecule;
+8. returns canonical SMILES.
 
-For multiple scaffold and R-group rows, the pipeline generates the full Cartesian product.
+For multiple rows, the full Cartesian product is generated.
 
 Example:
 
@@ -113,8 +222,6 @@ Example:
 ```
 
 ## Output validation contract
-
-RDKit parseability alone is not considered sufficient validation.
 
 A generated molecule is valid only if it:
 
@@ -126,24 +233,19 @@ A generated molecule is valid only if it:
 - can be converted to canonical SMILES;
 - can be parsed again from canonical SMILES.
 
-Examples that must be rejected:
+Invalid molecules fail the task instead of being silently skipped.
+
+## Processing stages
+
+### 1. Generated molecules
+
+Output:
 
 ```text
-C*C
-CC*
-CC.CC
+output/<dataset_id>_generated_molecules.csv
 ```
 
-Only validated molecules may be used by downstream steps such as:
-
-- molecular property calculation;
-- fingerprint generation;
-- clustering;
-- prediction.
-
-## Output format
-
-The generated CSV contains:
+Columns:
 
 ```text
 scaffold_id
@@ -153,22 +255,21 @@ r_group_smiles
 generated_smiles
 ```
 
-Example:
+### 2. Molecular properties
 
-```csv
-scaffold_id,r_group_id,scaffold_smiles,r_group_smiles,generated_smiles
-0,0,c1ccc([*:1])cc1,[*:1]C,Cc1ccccc1
-```
-
-## Molecular properties
-
-The properties stage reads:
+Input:
 
 ```text
 output/<dataset_id>_generated_molecules.csv
 ```
 
-It preserves all input columns and adds:
+Output:
+
+```text
+output/<dataset_id>_molecular_properties.csv
+```
+
+Added columns:
 
 ```text
 canonical_smiles
@@ -189,11 +290,19 @@ qed
 lipinski_pass
 ```
 
-Invalid generated SMILES are not skipped. The processing task fails immediately.
+### 3. ECFP4 fingerprints
 
-## ECFP4 fingerprints
+Input:
 
-Fingerprints are calculated from `canonical_smiles`.
+```text
+output/<dataset_id>_molecular_properties.csv
+```
+
+Output:
+
+```text
+output/<dataset_id>_fingerprints.csv
+```
 
 Configuration:
 
@@ -203,7 +312,7 @@ Morgan radius: 2
 fingerprint size: 2048 bits
 ```
 
-The fingerprint stage adds:
+Added columns:
 
 ```text
 fingerprint_type
@@ -211,15 +320,21 @@ fingerprint
 fingerprint_on_bits
 ```
 
-The `fingerprint` column stores a 2048-character binary string.
+### 4. K-means clustering
 
-Fingerprints are calculated once for each unique canonical SMILES and then mapped back to all source rows.
+Input:
 
-## K-means clustering
+```text
+output/<dataset_id>_fingerprints.csv
+```
 
-Clustering uses the ECFP4 fingerprint matrix rather than molecular properties.
+Output:
 
-The clustering stage adds:
+```text
+output/<dataset_id>_clustered_molecules.csv
+```
+
+Added columns:
 
 ```text
 cluster_id
@@ -234,13 +349,70 @@ random_state = 42
 n_init = 10
 ```
 
-The default cluster count can be configured with:
+## Airflow DAG
 
-```env
-MOLECULES_DEFAULT_N_CLUSTERS=5
+DAG ID:
+
+```text
+molecule_generation_dag
 ```
 
-The value can be overridden when the DAG is triggered manually.
+Task flow:
+
+```text
+start
+→ discover_datasets
+→ process_datasets
+→ finish
+```
+
+### `discover_datasets`
+
+The task:
+
+- receives `data_interval_start` and `data_interval_end` from Airflow;
+- lists S3 input and output objects;
+- detects changed input datasets;
+- validates complete input pairs;
+- applies `overwrite` behavior;
+- returns a list of dataset IDs through XCom.
+
+### `process_datasets`
+
+The task processes every discovered dataset through the complete pipeline:
+
+```text
+molecule generation
+→ molecular properties
+→ ECFP4 fingerprints
+→ K-means clustering
+```
+
+When no datasets require processing, the task returns an empty list and the DAG finishes successfully.
+
+## DAG parameters
+
+Default parameters:
+
+```json
+{
+  "overwrite": false,
+  "n_clusters": 5
+}
+```
+
+`dataset_id` is no longer supplied manually in Step 2. Dataset IDs are discovered from S3 object names.
+
+## Output files
+
+For `test001`, the complete pipeline writes:
+
+```text
+bronze/output/test001_generated_molecules.csv
+bronze/output/test001_molecular_properties.csv
+bronze/output/test001_fingerprints.csv
+bronze/output/test001_clustered_molecules.csv
+```
 
 ## Project structure
 
@@ -251,6 +423,7 @@ dags/
     ├── molecules/
     │   ├── __init__.py
     │   ├── clustering.py
+    │   ├── dataset_discovery.py
     │   ├── fingerprints.py
     │   ├── generation.py
     │   ├── pipeline.py
@@ -269,6 +442,7 @@ tests/
 │   └── output/
 │       └── test001_generated_molecules.csv
 ├── test_clustering.py
+├── test_dataset_discovery.py
 ├── test_fingerprints.py
 ├── test_generation.py
 ├── test_pipeline.py
@@ -278,89 +452,59 @@ tests/
 
 ## Module responsibilities
 
-### `generation.py`
+### `dataset_discovery.py`
 
-Contains the molecule-level logic:
-
-```text
-one scaffold + one R-group → one validated molecule
-```
-
-### `smiles_parser.py`
-
-Contains CSV parsing and normalization:
+Contains pure discovery logic:
 
 ```text
-CSV bytes → normalized DataFrame with a smiles column
+S3 object metadata
++ Airflow data interval
++ complete input pairs
++ overwrite policy
+→ dataset IDs to process
 ```
 
-It also serializes output DataFrames to CSV bytes.
-
-### `pipeline.py`
-
-Contains DataFrame-level processing:
-
-```text
-scaffold DataFrame × R-group DataFrame
-→ generated molecule DataFrame
-```
+The module has no Airflow or S3 client dependency and can be unit tested locally.
 
 ### `storage_pipeline.py`
 
-Contains storage orchestration:
+Contains S3 storage orchestration:
 
 ```text
-dataset_id
+list input/output objects
+→ discover datasets
 → build S3 keys
-→ check input objects
-→ download CSV files
-→ generate molecules
-→ calculate properties
-→ generate fingerprints
-→ cluster molecules
-→ upload stage outputs
+→ download inputs
+→ run processing stages
+→ upload outputs
 ```
 
-The S3 functions are injected into this layer, which allows the business logic to be tested locally without requiring Airflow.
+S3 functions are injected into this layer so the orchestration can be tested without a live Airflow or MinIO environment.
+
+### `s3.py`
+
+Contains generic helpers for S3-compatible storage:
+
+- upload bytes;
+- download objects;
+- check object existence;
+- list object keys;
+- list objects with `LastModified` metadata.
+
+Object listing uses an S3 paginator and therefore supports more than one response page.
 
 ### `molecule_generation_dag.py`
 
-Contains the thin Airflow DAG wrapper.
+Contains the Airflow wrapper:
 
-The DAG:
+- weekly schedule;
+- explicit `Asia/Yerevan` timezone;
+- Airflow parameters;
+- Airflow data interval handling;
+- S3 discovery task;
+- complete dataset-processing task.
 
-- accepts `dataset_id`;
-- accepts `n_clusters`;
-- uses the `aws_s3` Airflow connection;
-- calls the storage pipeline;
-- contains no cheminformatics business logic.
-
-## Airflow DAG
-
-DAG ID:
-
-```text
-molecule_generation_dag
-```
-
-The DAG is manually triggered in Step 1.
-
-Tasks:
-
-```text
-start
-→ generate_molecules
-→ finish
-```
-
-Example DAG parameters:
-
-```json
-{
-  "dataset_id": "test001",
-  "n_clusters": 5
-}
-```
+Cheminformatics business logic remains outside the DAG.
 
 ## Environment variables
 
@@ -373,7 +517,7 @@ MOLECULES_OUTPUT_PREFIX=output
 MOLECULES_DEFAULT_N_CLUSTERS=5
 ```
 
-The Airflow connection is provided through:
+The Airflow connection is supplied through:
 
 ```text
 AIRFLOW_CONN_AWS_S3
@@ -399,195 +543,145 @@ rdkit>=2023.9.1
 pandera>=0.20.0
 soda-core-postgres>=3.3.0
 scikit-learn>=1.5.0
+pendulum
 ```
 
-After dependency changes, rebuild the Docker images:
+After dependency changes:
 
 ```powershell
 docker compose build
 docker compose up -d
 ```
 
-Verify scikit-learn inside Airflow:
-
-```powershell
-docker compose exec airflow-scheduler python -c "import sklearn; print(sklearn.__version__)"
-```
-
 ## Tests
 
-Run all tests locally:
+Run Step 2 tests:
+
+```powershell
+python -m pytest `
+    tests/test_dataset_discovery.py `
+    tests/test_storage_pipeline.py `
+    -v
+```
+
+Run the complete test suite:
 
 ```powershell
 python -m pytest tests -v
 ```
 
-The test suite covers:
+Check syntax:
 
-- basic molecule generation;
-- mapped and unmapped attachment points;
-- invalid scaffold and R-group SMILES;
-- missing attachment points;
-- multiple attachment-point rejection;
-- attachment-point mismatch;
-- output sanitization;
-- unresolved dummy atom rejection;
-- unresolved atom-map rejection;
-- disconnected fragment rejection;
-- canonical SMILES round-trip validation;
-- CSV parsing;
-- DataFrame Cartesian product generation;
-- expected fixture comparison;
-- S3 key construction;
-- missing S3 objects;
-- S3 processing with injected test functions;
-- output upload parameters;
-- generation of 100 molecules from 10 × 10 fixture inputs;
-- molecular properties calculation;
-- Lipinski rule evaluation;
-- ECFP4 fingerprint shape and determinism;
-- equivalent-SMILES fingerprint consistency;
-- fingerprint serialization and matrix reconstruction;
-- K-means clustering validation;
-- deterministic clustering;
-- storage orchestration for every output stage.
-
-## Test fixtures
-
-The Step 1 fixture dataset contains:
-
-```text
-10 scaffolds
-10 R-groups
-100 expected generated molecules
+```powershell
+python -m py_compile `
+    dags/molecule_generation_dag.py `
+    dags/lib/molecules/dataset_discovery.py `
+    dags/lib/molecules/storage_pipeline.py `
+    dags/lib/utils/s3.py
 ```
 
-Input fixtures:
+Check Airflow import errors:
 
-```text
-tests/fixture/input/test001_scaffolds.csv
-tests/fixture/input/test001_r_groups.csv
+```powershell
+docker compose exec airflow-scheduler airflow dags list-import-errors
 ```
 
-Expected output fixture:
+List DAGs:
 
-```text
-tests/fixture/output/test001_generated_molecules.csv
+```powershell
+docker compose exec airflow-scheduler airflow dags list
 ```
 
-## End-to-end verification
+## Step 2 verification status
 
-The complete pipeline was tested through:
+The Step 2 implementation has been verified successfully.
 
-```text
-MinIO input
-→ Airflow DAG
-→ molecule generation
-→ molecular properties calculation
-→ ECFP4 fingerprint generation
-→ K-means clustering
-→ CSV serialization
-→ MinIO output
-```
+- the complete test suite passes;
+- the DAG imports without Airflow errors;
+- the weekly schedule works;
+- S3 objects are filtered by `LastModified`;
+- complete scaffold and R-group pairs are detected correctly;
+- `overwrite=False` skips completed datasets;
+- `overwrite=True` reprocesses all complete datasets and replaces outputs;
+- the full DAG runs successfully through Airflow and MinIO.
 
-Input objects:
+## Step 2 verification scenarios
 
-```text
-bronze/input/test001_scaffolds.csv
-bronze/input/test001_r_groups.csv
-```
+### Scenario 1: new dataset, `overwrite=False`
 
-Generated objects:
+1. Upload a new complete pair:
 
 ```text
-bronze/output/test001_generated_molecules.csv
-bronze/output/test001_molecular_properties.csv
-bronze/output/test001_fingerprints.csv
-bronze/output/test001_clustered_molecules.csv
+input/test002_scaffolds.csv
+input/test002_r_groups.csv
 ```
 
-Verification results:
+2. Ensure at least one file has `LastModified` within the current Airflow data interval.
+3. Run the DAG with:
 
-```text
-test001_generated_molecules.csv: 100 rows × 5 columns
-test001_molecular_properties.csv: 100 rows × 21 columns
-test001_fingerprints.csv: 100 rows × 24 columns
-test001_clustered_molecules.csv: 100 rows × 26 columns
+```json
+{
+  "overwrite": false,
+  "n_clusters": 5
+}
 ```
 
-Additional checks:
+4. Verify that four output files are created.
+5. Run again with `overwrite=False`.
+6. Verify that the completed dataset is skipped.
 
-```text
-100 unique scaffold_id × r_group_id combinations
-fingerprint matrix shape: 100 × 2048
-fingerprint type: ECFP4
-fingerprint length: 2048 bits
-number of clusters: 5
-missing values: 0
-duplicate full rows: 0
+### Scenario 2: full reprocessing, `overwrite=True`
+
+Run the DAG with:
+
+```json
+{
+  "overwrite": true,
+  "n_clusters": 5
+}
 ```
 
-Cluster distribution:
+Verify that:
 
-```text
-cluster 0: 12 molecules
-cluster 1: 10 molecules
-cluster 2: 40 molecules
-cluster 3: 28 molecules
-cluster 4: 10 molecules
-```
-
-All Airflow tasks completed successfully and all four output files were written to MinIO.
+- every complete dataset pair is processed;
+- existing outputs are replaced;
+- all four stage files receive updated modification timestamps.
 
 ## Current implementation status
 
 Completed:
 
-- [x] Create molecule generation package
-- [x] Implement one scaffold + one R-group generation
-- [x] Support unnumbered attachment points
-- [x] Support mapped attachment points
-- [x] Reject mismatched attachment-point numbers
-- [x] Reject multiple attachment points
-- [x] Add explicit output validation
-- [x] Add molecule-level unit tests
-- [x] Add CSV bytes parser
-- [x] Add DataFrame-level generation
-- [x] Add fixture input and expected output files
-- [x] Add pipeline tests
-- [x] Add S3 storage pipeline
-- [x] Add storage pipeline tests
-- [x] Add thin Airflow DAG with `dataset_id`
-- [x] Configure Airflow connection for MinIO
-- [x] Run end-to-end test with `test001`
-- [x] Generate and validate 100 output molecules
+- [x] Molecule generation
+- [x] Explicit molecule validation
+- [x] CSV parsing and normalization
+- [x] Molecular-property calculation
+- [x] ECFP4 fingerprint generation
+- [x] K-means clustering
+- [x] S3-compatible storage pipeline
+- [x] Weekly DAG schedule
+- [x] Explicit `Asia/Yerevan` timezone
+- [x] S3 `LastModified` listing with pagination
+- [x] Airflow data-interval filtering
+- [x] Complete-pair discovery
+- [x] `overwrite=False` behavior
+- [x] `overwrite=True` behavior
+- [x] Unit tests for discovery and storage orchestration
 
-Current feature work:
+Validation completed:
 
-- [x] Calculate molecular properties with RDKit
-- [x] Generate ECFP4 fingerprints
-- [x] Cluster fingerprints with K-means
-- [x] Add storage orchestration for all processing stages
-- [x] Extend the Airflow DAG with separate tasks
-- [x] Add tests for properties, fingerprints, clustering, and storage
-- [x] Rebuild the Docker images with scikit-learn
-- [x] Run the complete pipeline end-to-end through Airflow and MinIO
-- [x] Validate all four generated output files
+- [x] Complete local test suite passed
+- [x] Airflow DAG imports without errors
+- [x] Weekly DAG schedule is configured
+- [x] New S3 datasets are discovered by `LastModified`
+- [x] `overwrite=False` behavior works
+- [x] `overwrite=True` behavior works
+- [x] Step 2 end-to-end verification completed successfully
+- [x] DAG works correctly with Airflow and MinIO
+
+Release steps:
+
 - [ ] Open a pull request to `dev`
-
-## Development order
-
-```text
-1. Core molecule generation
-2. Input validation
-3. Output validation
-4. DataFrame-level generation
-5. Storage integration
-6. Airflow DAG wrapper
-7. End-to-end validation
-8. Pull request to dev
-9. Promotion from dev to master
-```
+- [ ] Merge the pull request into `dev`
 
 ## Branch policy
 

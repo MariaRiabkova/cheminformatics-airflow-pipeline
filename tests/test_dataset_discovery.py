@@ -1,15 +1,42 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from lib.molecules.dataset_discovery import (
+    discover_changed_datasets,
     discover_complete_datasets,
     discover_datasets_to_process,
     discover_processed_datasets,
     extract_dataset_id,
     normalize_prefix,
-    select_datasets_to_process,
 )
+
+
+INTERVAL_START = datetime(
+    2026,
+    7,
+    6,
+    3,
+    0,
+    tzinfo=timezone.utc,
+)
+
+INTERVAL_END = INTERVAL_START + timedelta(
+    days=7
+)
+
+
+def build_object(
+    key: str,
+    last_modified: datetime,
+) -> dict[str, object]:
+    """Build one S3 object metadata record for tests."""
+    return {
+        "key": key,
+        "last_modified": last_modified,
+    }
 
 
 def test_normalize_prefix():
@@ -185,6 +212,86 @@ def test_discover_complete_datasets_rejects_non_list():
         )
 
 
+def test_discover_changed_datasets():
+    input_objects = [
+        build_object(
+            "input/test001_scaffolds.csv",
+            INTERVAL_START + timedelta(days=1),
+        ),
+        build_object(
+            "input/test001_r_groups.csv",
+            INTERVAL_START - timedelta(days=1),
+        ),
+        build_object(
+            "input/test002_scaffolds.csv",
+            INTERVAL_START - timedelta(days=2),
+        ),
+        build_object(
+            "input/test002_r_groups.csv",
+            INTERVAL_END,
+        ),
+        build_object(
+            "input/readme.txt",
+            INTERVAL_START + timedelta(days=2),
+        ),
+    ]
+
+    result = discover_changed_datasets(
+        input_objects=input_objects,
+        interval_start=INTERVAL_START,
+        interval_end=INTERVAL_END,
+        input_prefix="input",
+    )
+
+    assert result == {"test001"}
+
+
+def test_discover_changed_datasets_includes_interval_start():
+    input_objects = [
+        build_object(
+            "input/test001_scaffolds.csv",
+            INTERVAL_START,
+        ),
+    ]
+
+    result = discover_changed_datasets(
+        input_objects=input_objects,
+        interval_start=INTERVAL_START,
+        interval_end=INTERVAL_END,
+    )
+
+    assert result == {"test001"}
+
+
+def test_discover_changed_datasets_excludes_interval_end():
+    input_objects = [
+        build_object(
+            "input/test001_scaffolds.csv",
+            INTERVAL_END,
+        ),
+    ]
+
+    result = discover_changed_datasets(
+        input_objects=input_objects,
+        interval_start=INTERVAL_START,
+        interval_end=INTERVAL_END,
+    )
+
+    assert result == set()
+
+
+def test_discover_changed_datasets_rejects_invalid_interval():
+    with pytest.raises(
+        ValueError,
+        match="Interval start must be earlier than interval end",
+    ):
+        discover_changed_datasets(
+            input_objects=[],
+            interval_start=INTERVAL_END,
+            interval_end=INTERVAL_START,
+        )
+
+
 def test_discover_processed_datasets():
     output_keys = [
         "output/test001_clustered_molecules.csv",
@@ -228,72 +335,28 @@ def test_discover_processed_datasets_rejects_non_list():
         )
 
 
-def test_select_datasets_to_process_without_overwrite():
-    result = select_datasets_to_process(
-        complete_dataset_ids=[
-            "test001",
-            "test002",
-        ],
-        output_keys=[
-            "output/test001_clustered_molecules.csv",
-        ],
-        overwrite=False,
-        output_prefix="output",
-    )
-
-    assert result == ["test002"]
-
-
-def test_select_datasets_to_process_with_overwrite():
-    result = select_datasets_to_process(
-        complete_dataset_ids=[
-            "test002",
-            "test001",
-            "test001",
-        ],
-        output_keys=[
-            "output/test001_clustered_molecules.csv",
-        ],
-        overwrite=True,
-        output_prefix="output",
-    )
-
-    assert result == [
-        "test001",
-        "test002",
-    ]
-
-
-def test_select_datasets_to_process_rejects_non_boolean_overwrite():
-    with pytest.raises(
-        TypeError,
-        match="Overwrite must be a boolean",
-    ):
-        select_datasets_to_process(
-            complete_dataset_ids=["test001"],
-            output_keys=[],
-            overwrite="false",
-        )
-
-
-def test_select_datasets_to_process_rejects_non_list_dataset_ids():
-    with pytest.raises(
-        TypeError,
-        match="Dataset IDs must be provided as a list",
-    ):
-        select_datasets_to_process(
-            complete_dataset_ids="test001",
-            output_keys=[],
-        )
-
-
 def test_discover_datasets_to_process_without_overwrite():
-    input_keys = [
-        "input/test001_scaffolds.csv",
-        "input/test001_r_groups.csv",
-        "input/test002_scaffolds.csv",
-        "input/test002_r_groups.csv",
-        "input/test003_scaffolds.csv",
+    input_objects = [
+        build_object(
+            "input/test001_scaffolds.csv",
+            INTERVAL_START + timedelta(days=1),
+        ),
+        build_object(
+            "input/test001_r_groups.csv",
+            INTERVAL_START + timedelta(days=1),
+        ),
+        build_object(
+            "input/test002_scaffolds.csv",
+            INTERVAL_START + timedelta(days=2),
+        ),
+        build_object(
+            "input/test002_r_groups.csv",
+            INTERVAL_START - timedelta(days=2),
+        ),
+        build_object(
+            "input/test003_scaffolds.csv",
+            INTERVAL_START + timedelta(days=3),
+        ),
     ]
 
     output_keys = [
@@ -301,8 +364,10 @@ def test_discover_datasets_to_process_without_overwrite():
     ]
 
     result = discover_datasets_to_process(
-        input_keys=input_keys,
+        input_objects=input_objects,
         output_keys=output_keys,
+        interval_start=INTERVAL_START,
+        interval_end=INTERVAL_END,
         overwrite=False,
         input_prefix="input",
         output_prefix="output",
@@ -312,11 +377,23 @@ def test_discover_datasets_to_process_without_overwrite():
 
 
 def test_discover_datasets_to_process_with_overwrite():
-    input_keys = [
-        "input/test001_scaffolds.csv",
-        "input/test001_r_groups.csv",
-        "input/test002_scaffolds.csv",
-        "input/test002_r_groups.csv",
+    input_objects = [
+        build_object(
+            "input/test001_scaffolds.csv",
+            INTERVAL_START - timedelta(days=10),
+        ),
+        build_object(
+            "input/test001_r_groups.csv",
+            INTERVAL_START - timedelta(days=10),
+        ),
+        build_object(
+            "input/test002_scaffolds.csv",
+            INTERVAL_START - timedelta(days=10),
+        ),
+        build_object(
+            "input/test002_r_groups.csv",
+            INTERVAL_START - timedelta(days=10),
+        ),
     ]
 
     output_keys = [
@@ -324,8 +401,10 @@ def test_discover_datasets_to_process_with_overwrite():
     ]
 
     result = discover_datasets_to_process(
-        input_keys=input_keys,
+        input_objects=input_objects,
         output_keys=output_keys,
+        interval_start=INTERVAL_START,
+        interval_end=INTERVAL_END,
         overwrite=True,
         input_prefix="input",
         output_prefix="output",
@@ -337,13 +416,34 @@ def test_discover_datasets_to_process_with_overwrite():
     ]
 
 
-def test_discover_datasets_to_process_returns_empty_list():
-    result = discover_datasets_to_process(
-        input_keys=[
+def test_discover_datasets_to_process_requires_complete_pair():
+    input_objects = [
+        build_object(
             "input/test001_scaffolds.csv",
-        ],
+            INTERVAL_START + timedelta(days=1),
+        ),
+    ]
+
+    result = discover_datasets_to_process(
+        input_objects=input_objects,
         output_keys=[],
+        interval_start=INTERVAL_START,
+        interval_end=INTERVAL_END,
         overwrite=False,
     )
 
     assert result == []
+
+
+def test_discover_datasets_to_process_rejects_non_boolean_overwrite():
+    with pytest.raises(
+        TypeError,
+        match="Overwrite must be a boolean",
+    ):
+        discover_datasets_to_process(
+            input_objects=[],
+            output_keys=[],
+            interval_start=INTERVAL_START,
+            interval_end=INTERVAL_END,
+            overwrite="false",
+        )
