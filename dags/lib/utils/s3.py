@@ -17,3 +17,14 @@ def download_object(key, bucket_name, aws_conn_id):
 
 def object_exists(key, bucket_name, aws_conn_id):
     return S3Hook(aws_conn_id=aws_conn_id).check_for_key(key, bucket_name=bucket_name)
+
+
+def list_object_keys(prefix, bucket_name, aws_conn_id):
+    keys = S3Hook(
+        aws_conn_id=aws_conn_id
+    ).list_keys(
+        bucket_name=bucket_name,
+        prefix=prefix,
+    )
+
+    return keys or []
